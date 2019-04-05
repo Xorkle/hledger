@@ -41,6 +41,8 @@ import Data.Char (isSpace)
 import Data.List (foldl')
 import Data.Maybe
 import Data.Text (Text)
+import Data.Time.Calendar
+import Data.Time.LocalTime
 import Text.Megaparsec hiding (parse)
 import Text.Megaparsec.Char
 
@@ -93,25 +95,25 @@ timedotdayp :: JournalParser m [Transaction]
 timedotdayp = do
   traceParse " timedotdayp"
   d <- datep <* lift eolof
+  let year = first3 $ toGregorian d
   es <- catMaybes <$> many (const Nothing <$> try (lift emptyorcommentlinep) <|>
-                            Just <$> (notFollowedBy datep >> timedotentryp))
+                            Just <$> (notFollowedBy datep >> timedotentryp (Just year)))
   return $ map (\t -> t{tdate=d}) es -- <$> many timedotentryp
+
 
 -- | Parse a single timedot entry to one (dateless) transaction.
 -- @
 -- fos.haskell  .... ..
 -- @
-timedotentryp :: JournalParser m Transaction
-timedotentryp = do
+timedotentryp :: Maybe Year -> JournalParser m Transaction
+timedotentryp mTransactionYear = do
   traceParse "  timedotentryp"
   pos <- genericSourcePos <$> getSourcePos
   lift (skipMany spacenonewline)
   a <- modifiedaccountnamep
   lift (skipMany spacenonewline)
-  hours <-
-    try (lift followingcommentp >> return 0)
-    <|> (timedotdurationp <*
-         (try (lift followingcommentp) <|> (newline >> return "")))
+  hours <- timedotdurationp
+  (comment,tags,mdate,mdate2) <- lift $ postingcommentp mTransactionYear
   let t = nulltransaction{
         tsourcepos = pos,
         tstatus    = Cleared,
@@ -120,6 +122,7 @@ timedotentryp = do
                      ,pamount=Mixed [setAmountPrecision 2 $ num hours]  -- don't assume hours; do set precision to 2
                      ,ptype=VirtualPosting
                      ,ptransaction=Just t
+                     ,ptags=tags
                      }
           ]
         }
@@ -142,16 +145,16 @@ timedotnumericp = do
   (q, _, _, _) <- lift $ numberp Nothing
   msymbol <- optional $ choice $ map (string . fst) timeUnits
   lift (skipMany spacenonewline)
-  let q' = 
+  let q' =
         case msymbol of
           Nothing  -> q
           Just sym ->
             case lookup sym timeUnits of
-              Just mult -> q * mult  
+              Just mult -> q * mult
               Nothing   -> q  -- shouldn't happen.. ignore
   return q'
 
--- (symbol, equivalent in hours). 
+-- (symbol, equivalent in hours).
 timeUnits =
   [("s",2.777777777777778e-4)
   ,("mo",5040) -- before "m"
